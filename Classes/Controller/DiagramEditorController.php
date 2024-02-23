@@ -1,54 +1,45 @@
 <?php
+
+declare(strict_types=1);
+
 namespace Sandstorm\MxGraph\Controller;
 
+use Neos\ContentRepository\Core\Feature\NodeModification\Command\SetNodeProperties;
+use Neos\ContentRepository\Core\Feature\NodeModification\Dto\PropertyValuesToWrite;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Node;
+use Neos\ContentRepositoryRegistry\ContentRepositoryRegistry;
 use Neos\Flow\Annotations as Flow;
 use Neos\Flow\Mvc\Controller\ActionController;
 use Neos\Flow\ResourceManagement\ResourceManager;
 use Neos\Media\Domain\Model\Asset;
 use Neos\Media\Domain\Model\Image;
-use Neos\ContentRepository\Domain\Model\NodeInterface;
+use Neos\Neos\FrontendRouting\NodeAddressFactory;
 use Sandstorm\MxGraph\DiagramIdentifierSearchService;
-use Sandstorm\MxGraph\Domain\Model\Diagram;
 
 class DiagramEditorController extends ActionController
 {
+    private const LOCAL_DRAWIO_EMBED_URL = 'LOCAL';
 
-    /**
-     * @Flow\Inject
-     * @var ResourceManager
-     */
-    protected $resourceManager;
+    #[Flow\Inject]
+    protected ContentRepositoryRegistry $contentRepositoryRegistry;
 
-    /**
-     * @Flow\Inject
-     * @var DiagramIdentifierSearchService
-     */
-    protected $diagramIdentifierSearchService;
+    #[Flow\Inject]
+    protected ResourceManager $resourceManager;
 
-    /**
-     * @Flow\InjectConfiguration(path="drawioEmbedUrl")
-     * @var string
-     */
-    protected $drawioEmbedUrl;
-    const LOCAL_DRAWIO_EMBED_URL = 'LOCAL';
+    #[Flow\Inject]
+    protected DiagramIdentifierSearchService $diagramIdentifierSearchService;
 
-    /**
-     * @Flow\InjectConfiguration(path="drawioEmbedParameters")
-     * @var array
-     */
-    protected $drawioEmbedParameters;
+    #[Flow\InjectConfiguration(path: 'drawioEmbedUrl')]
+    protected string $drawioEmbedUrl;
 
-    /**
-     * @Flow\InjectConfiguration(path="drawioConfiguration")
-     * @var array
-     */
-    protected $drawioConfiguration;
+    #[Flow\InjectConfiguration(path: 'drawioEmbedParameters')]
+    protected array $drawioEmbedParameters;
+
+    #[Flow\InjectConfiguration(path: 'drawioConfiguration')]
+    protected array $drawioConfiguration = [];
 
 
-    /**
-     * @param NodeInterface $diagramNode
-     */
-    public function indexAction(NodeInterface $diagramNode)
+    public function indexAction(Node $diagramNode): void
     {
         $drawioEmbedUrlWithParameters = $this->drawioEmbedUrl;
         if ($drawioEmbedUrlWithParameters === self::LOCAL_DRAWIO_EMBED_URL) {
@@ -62,8 +53,12 @@ class DiagramEditorController extends ActionController
 
         $drawioEmbedUrlWithParameters .= '?' .  http_build_query($drawioEmbedParameters);
 
+        $nodeAddressFactory = NodeAddressFactory::create(
+            $this->contentRepositoryRegistry->get($diagramNode->subgraphIdentity->contentRepositoryId)
+        );
+
         $this->view->assign('diagram', $diagramNode->getProperty('diagramSource'));
-        $this->view->assign('diagramNode', $diagramNode->getContextPath());
+        $this->view->assign('diagramNode', $nodeAddressFactory->createFromNode($diagramNode));
         $this->view->assign('drawioEmbedUrlWithParameters', $drawioEmbedUrlWithParameters);
         $this->view->assign('drawioConfiguration', is_array($this->drawioConfiguration) ? $this->drawioConfiguration : []);
 
@@ -75,25 +70,25 @@ class DiagramEditorController extends ActionController
     {
     }
 
-
-    /**
-     * @param NodeInterface $node
-     * @param string $xml
-     * @param string $svg
-     * @Flow\SkipCsrfProtection
-     */
-    public function saveAction(NodeInterface $node, $xml, $svg)
+    #[Flow\SkipCsrfProtection]
+    public function saveAction(Node $node, string $xml, string $svg): string
     {
-
+        $contentRepository = $this->contentRepositoryRegistry->get($node->subgraphIdentity->contentRepositoryId);
+        $subgraph = $contentRepository->getContentGraph()->getSubgraph(
+            $node->subgraphIdentity->contentStreamId,
+            $node->subgraphIdentity->dimensionSpacePoint,
+            $node->subgraphIdentity->visibilityConstraints
+        );
+        $propertyValuesToWrite = [];
         if (empty($svg)) {
             // XML without SVG -> autosaved - not supported right now.
-            $node->setProperty('diagramSourceAutosaved', $xml);
+            $propertyValuesToWrite['diagramSourceAutosaved'] = $xml;
             throw new \RuntimeException("TODO - autosave not supported right now.");
         }
 
-        $node->setProperty('diagramSource', $xml);
+        $propertyValuesToWrite['diagramSource'] = $xml;
         // NEW since version 3.0.0
-        $node->setProperty('diagramSvgText', $svg);
+        $propertyValuesToWrite['diagramSvgText'] = $svg;
 
         $diagramIdentifier = $node->getProperty('diagramIdentifier');
         if (!empty($diagramIdentifier)) {
@@ -114,10 +109,18 @@ class DiagramEditorController extends ActionController
             $image->setResource($persistentResource);
         } else {
             $image = new Image($persistentResource);
+            $propertyValuesToWrite['image'] = $image;
         }
-
-        $node->setProperty('image', $image);
         // END DEPRECATION since version 3.0.0
+
+        $this->contentRepositoryRegistry->get($node->subgraphIdentity->contentRepositoryId)->handle(
+            SetNodeProperties::create(
+                $node->subgraphIdentity->contentStreamId,
+                $node->nodeAggregateId,
+                $node->originDimensionSpacePoint,
+                PropertyValuesToWrite::fromArray($propertyValuesToWrite)
+            )
+        )->block();
 
         return 'OK';
     }
